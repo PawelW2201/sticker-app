@@ -2,7 +2,7 @@
 // from your private repo's dashboard-data branch with a read-only token.
 import { timeChart, crosshairGroup, sparkline, barList, toDate, fmtDay } from "./charts.js";
 
-const VERSION = "1.0.2";
+const VERSION = "1.0.3";
 const STORE = "stickertracker.v1";
 const DATA_CACHE = "st-data-v1";
 const DEFAULT_BRANCH = "dashboard-data";
@@ -324,7 +324,12 @@ function renderStatus() {
   let msg, action = null;
   if (e.status === 0) msg = state.summary ? `Offline. Showing saved data from ${longDay(state.summary.as_of)}.` : "Can't reach GitHub. Check your connection, then refresh.";
   else if (e.status === 401) { msg = "GitHub rejected the token; it may have expired or been revoked. Add a new one in Settings."; action = ["Open settings", openSettings]; }
-  else if (e.status === 404) { msg = `No app data on the ${cfg.branch || DEFAULT_BRANCH} branch of ${cfg.repo}. The nightly run publishes it after the app-data step is merged; or check the token can see this repository.`; action = ["Open settings", openSettings]; }
+  else if (e.status === 404) {
+    msg = isAppRepo(cfg.repo)
+      ? `${cfg.repo} is this app's own repository, which has no tracker data. In Settings, change the repository to your tracker repository, and make sure the token can read it.`
+      : `Can't find app data in ${cfg.repo}. Either the token can't read that repository (on GitHub, edit the token and add it under Repository access), or the nightly run hasn't published to the ${cfg.branch || DEFAULT_BRANCH} branch yet.`;
+    action = ["Open settings", openSettings];
+  }
   else if (e.rateLimited) msg = "GitHub's rate limit is used up for now. Try again in a few minutes.";
   else msg = `Loading failed: ${e.message}`;
   el.appendChild(h("div", { class: "banner warn", role: "status" }, h("span", { text: msg }),
@@ -875,9 +880,9 @@ function viewSettings() {
       await cacheClear();
       load({ force: true });
     } catch (e) {
-      msg.textContent = e.status === 401 ? "GitHub rejected that token." : e.status === 404
-        ? "Can't find app data there. Check the repository name, the branch, and that the token can read this repository."
-        : `Check failed: ${e.message}`;
+      if (e.status === 404 && isAppRepo(next.repo)) { msg.textContent = "That's this app's own repository. Enter your tracker repository instead."; return; }
+      if (e.status === 404) { cantSeeTracker(msg); msg.prepend("Can't find app data there. Check the repository name and branch. If they're right, then: "); return; }
+      msg.textContent = e.status === 401 ? "GitHub rejected that token." : `Check failed: ${e.message}`;
     }
   };
   const theme = cfg.theme || "system";
@@ -943,6 +948,7 @@ function viewSettings() {
       h("label", { class: "field" }, h("span", { text: "Data branch" }), branchIn),
       h("label", { class: "field" }, h("span", { text: "Replace token" }), tokenIn),
       h("div", { class: "row-btns" }, h("button", { type: "button", class: "btn", onclick: saveConn }, "Save and check"),
+        h("a", { class: "btn ghost", href: TOKENS_URL, target: "_blank", rel: "noopener" }, "Edit token access"),
         h("a", { class: "btn ghost", href: TOKEN_URL, target: "_blank", rel: "noopener" }, "Create a new token")),
       msg),
     h("section", { class: "set-sec" }, h("h3", { class: "h3", text: "Use it on your phone" }),
@@ -981,6 +987,27 @@ function viewSettings() {
 const TOKEN_URL = "https://github.com/settings/personal-access-tokens/new?" + new URLSearchParams({
   name: "StickerTracker app", description: "Read-only access for the StickerTracker app", expires_in: "366", contents: "read",
 }).toString();
+const TOKENS_URL = "https://github.com/settings/personal-access-tokens";
+
+// The repository this app is served from on GitHub Pages (owner.github.io/repo).
+// It holds only the app's code, so it is never the tracker.
+function appRepo() {
+  const m = location.hostname.match(/^([^.]+)\.github\.io$/i);
+  const seg = location.pathname.split("/").filter(Boolean)[0];
+  return m && seg ? `${m[1]}/${seg}`.toLowerCase() : null;
+}
+const isAppRepo = (full) => !!full && full.toLowerCase() === appRepo();
+
+// The tracker is the repository with the nightly data branch.
+async function hasDataBranch(full, token) {
+  try { await gh(`/repos/${full}/branches/${encodeURIComponent(DEFAULT_BRANCH)}`, undefined, token); return true; }
+  catch (e) { if (e.status === 404 || e.status === 403) return false; throw e; }
+}
+function cantSeeTracker(el) {
+  el.replaceChildren(
+    "This token can't read your tracker repository. On GitHub, open the token and choose Edit. Under Repository access, pick Only select repositories and your private tracker repository (not this app's own repository). Then under Permissions, add Contents: Read-only in the Repositories box. Without it, GitHub saves the token as public-only. Update, then try again. ",
+    h("a", { href: TOKENS_URL, target: "_blank", rel: "noopener" }, "Open your tokens on GitHub"));
+}
 
 function viewSetup() {
   const tokenIn = h("input", { type: "password", class: "input", placeholder: "github_pat_…", autocomplete: "off", spellcheck: "false", id: "tok" });
@@ -993,10 +1020,13 @@ function viewSetup() {
     try {
       if (!repo) {
         const repos = await gh("/user/repos?per_page=100&sort=pushed", undefined, token);
-        const cands = repos.filter((r) => r.permissions?.pull);
-        const priv = cands.filter((r) => r.private);
-        const list = priv.length ? priv : cands;
-        if (!list.length) { msg.textContent = "This token can't see any repositories. Give it access to your tracker repo."; return; }
+        const cands = repos.filter((r) => r.permissions?.pull && !isAppRepo(r.full_name));
+        const probed = await Promise.all(cands.slice(0, 30).map((r) =>
+          hasDataBranch(r.full_name, token).then((ok) => (ok ? r : null))));
+        const withData = probed.filter(Boolean);
+        // No data branch anywhere yet: fall back to the private repositories.
+        const list = withData.length ? withData : cands.filter((r) => r.private);
+        if (!list.length) { cantSeeTracker(msg); return; }
         if (list.length > 1) {
           msg.textContent = "Which repository holds your tracker?";
           pick.replaceChildren(...list.map((r) => h("button", { type: "button", class: "btn ghost", onclick: () => connect(r.full_name) }, r.full_name)));
@@ -1026,7 +1056,7 @@ function viewSetup() {
       h("p", { class: "lede", text: "This app reads the nightly summary from your private tracker repository. It needs a read-only GitHub token, which stays on this device." }),
       h("ol", { class: "steps" },
         h("li", null, h("a", { class: "btn", href: TOKEN_URL, target: "_blank", rel: "noopener" }, "Create a read-only token"),
-          h("p", { class: "muted" }, "On GitHub, set Repository access to Only select repositories and pick your tracker repo. Contents read access is already filled in. Then generate the token and copy it.")),
+          h("p", { class: "muted" }, "On GitHub, set Repository access to Only select repositories and pick your private tracker repository, the one the nightly workflow runs in (not this app's own repository). Contents read access is already filled in. Then generate the token and copy it.")),
         h("li", null, h("label", { class: "field", for: "tok" }, h("span", { text: "Paste the token" }), tokenIn),
           h("button", { type: "button", class: "btn", onclick: () => connect(null) }, "Connect"), msg, pick)),
       h("p", { class: "muted small", text: "Have a setup link from your other device? Open it on this one and you're connected." })));
