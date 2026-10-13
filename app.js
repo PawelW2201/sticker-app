@@ -2,13 +2,13 @@
 // from your private repo's dashboard-data branch with a read-only token.
 import { timeChart, crosshairGroup, sparkline, barList, toDate, fmtDay } from "./charts.js";
 
-const VERSION = "1.0.3";
+const VERSION = "1.0.4";
 const STORE = "stickertracker.v1";
 const DATA_CACHE = "st-data-v1";
 const DEFAULT_BRANCH = "dashboard-data";
 const RAW = "application/vnd.github.raw+json";
 const DAY = 86400000;
-const TABS = ["today", "drift", "book", "agent"];
+const TABS = ["today", "drift", "book", "agent", "watch"];
 const RANGES = { "1M": 31, "3M": 92, "6M": 183, "1Y": 366, All: null };
 
 // ------------------------------------------------------------------ helpers
@@ -76,6 +76,7 @@ function nameParts(mhn) {
     if (m) { team = m[1]; variant = m[2]; }
     return { team, variant, event: parts.slice(2).join(" | ") };
   }
+  if (parts.length >= 2) return { team: parts[0], variant: "", event: parts.slice(1).join(" | ") };  // agent | faction
   return { team: String(mhn), variant: "", event: "" };
 }
 const shortName = (mhn) => { const p = nameParts(mhn); return `${p.team}${p.variant && p.variant !== "Holo" ? ` (${p.variant})` : ""}, ${p.event}`; };
@@ -247,7 +248,7 @@ function render() {
   if (!state.summary) {
     main.appendChild(state.error ? h("div") : h("div", { class: "loading-shell" }, h("p", { text: "Loading your tracker…" })));
   } else {
-    const view = { today: viewToday, drift: viewDrift, book: viewBook, agent: viewAgent }[state.tab];
+    const view = { today: viewToday, drift: viewDrift, book: viewBook, agent: viewAgent, watch: viewWatch }[state.tab];
     try { main.appendChild(view()); }
     catch (e) { console.error(e); main.appendChild(h("p", { class: "empty", text: `This view couldn't be drawn: ${e.message}` })); }
   }
@@ -262,12 +263,13 @@ function brand() {
     h("span", { class: "brand-name", text: "StickerTracker" }));
 }
 
-const TAB_LABEL = { today: "Today", drift: "Drift desk", book: "Your book", agent: "Agent" };
+const TAB_LABEL = { today: "Today", drift: "Drift desk", book: "Your book", agent: "Agent", watch: "Watching" };
 const TAB_ICON = {
   today: "M4 12a8 8 0 1 0 16 0a8 8 0 1 0-16 0M12 7v5l3 2",
   drift: "M4 6h16M4 12h10M4 18h5",
   book: "M5 4h11l3 3v13H5zM9 10h6M9 14h6",
   agent: "M12 3l2.5 5 5.5.8-4 3.9.9 5.5L12 15.6 7.1 18.2l.9-5.5-4-3.9 5.5-.8z",
+  watch: "M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6",
 };
 function navIcon(d) {
   const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -567,7 +569,16 @@ function driftBrief(d) {
     kicker(`Drift desk, ${d.items.length} names`),
     h("h2", { class: "headline", text: headline }),
     catTiles(d, (cat) => { setUi("drift:cat", cat); go("#/drift"); }),
-    n ? changesList(ch.items, 6) : null);
+    n ? changesList(ch.items, 6) : null,
+    watchNote());
+}
+function watchNote() {
+  const w = state.summary.watch;
+  if (!w || !w.items || !w.items.length) return null;
+  const parts = (w.groups || []).filter((g) => g.drifting).map((g) => `${groupLabel(g.name)} ${g.drifting} of ${g.n}`);
+  return h("p", { class: "watch-note" },
+    `Watching ${w.items.length} more outside the agent's set` + (parts.length ? `, drifting: ${parts.join(", ")}. ` : ". "),
+    h("a", { href: "#/watch" }, "Open Watching"));
 }
 function pipelineNote(s) {
   const p = s.pipeline || {};
@@ -622,6 +633,86 @@ function driftRow(x) {
       h("span", { class: "dd" }, pair("W", ndelta(x.dW)), pair("M", ndelta(x.dM)), pair("Q", ndelta(x.dQ)))),
     h("span", { class: "c-px" }, h("span", { class: "k", text: "Ask" }), h("b", { text: price(p0) }),
       h("span", { class: "dd" }, pair("1w", delta(p1 ? p0 / p1 - 1 : null, "", 0)), pair("1mo", delta(p3 ? p0 / p3 - 1 : null, "", 0)))),
+    h("span", { class: "c-spark", title: "Listings, last 90 days" }, spark(x.mhn, "stock", 90, "var(--s-list)")),
+  );
+}
+
+// ------------------------------------------------------------------ Watching
+function groupLabel(g) {
+  const [ev, v] = String(g).split(" · ");
+  return v ? `${ev} ${v === "Holo" ? "holos" : v.toLowerCase()}` : ev;
+}
+const WATCH_SORTS = [["drift", "Drift category"], ["p7", "Price, 7 days"], ["p30", "Price, 30 days"], ["l30", "Listings, 30 days"], ["name", "Name"]];
+function viewWatch() {
+  const w = state.summary.watch;
+  const intro = (...kids) => section("intro", h("h1", { class: "title", text: "Watching" }), ...kids);
+  if (!w || !w.items || !w.items.length) {
+    return h("div", { class: "view watch" }, intro(emptyNote(
+      "Nothing here yet. Budapest 2025 and Cologne 2026 holos and agent skins appear after the first nightly run with the new tracking.")));
+  }
+  const groups = w.groups || [];
+  let grp = ui("watch:group", "ALL");
+  if (grp !== "ALL" && !groups.some((g) => g.name === grp)) grp = "ALL";
+  const driftOnly = ui("watch:drifting", false);
+  const sort = ui("watch:sort", "drift");
+  let items = w.items.filter((x) => (grp === "ALL" || x.group === grp) && (!driftOnly || x.cat));
+  const keyf = { p7: (x) => x.ch["7d"], p30: (x) => x.ch["30d"], l30: (x) => x.lch["30d"], name: (x) => x.mhn }[sort];
+  if (keyf) {
+    items = items.slice().sort((a, b) => {
+      const x = keyf(a), y = keyf(b);
+      if (x == null || y == null) return x == null ? (y == null ? 0 : 1) : -1;
+      return x < y ? -1 : x > y ? 1 : 0;
+    });
+  }
+  const chips = h("div", { class: "chips", role: "group", "aria-label": "Group" },
+    [{ name: "ALL", n: w.items.length }, ...groups].map((g) => h("button", {
+      type: "button", class: "chip", "aria-pressed": String(grp === g.name),
+      onclick: () => { setUi("watch:group", g.name); render(); },
+    }, h("span", { text: g.name === "ALL" ? "All" : groupLabel(g.name) }), h("span", { class: "chip-n", text: g.n }))));
+  const drifting = h("label", { class: "toggle" },
+    h("input", { type: "checkbox", checked: driftOnly, onchange: (e) => { setUi("watch:drifting", e.target.checked); render(); } }),
+    h("span", { text: "Only drifting" }));
+  const sortSel = h("select", { class: "select", "aria-label": "Sort by", onchange: (e) => { setUi("watch:sort", e.target.value, true); render(); } },
+    WATCH_SORTS.map(([v, l]) => h("option", { value: v, selected: v === sort }, `Sort: ${l}`)));
+  const list = (xs) => h("div", { class: "rows drift-rows", role: "list" }, xs.map(watchRow));
+  let body;
+  if (!items.length) body = emptyNote(driftOnly ? "Nothing in this group is drifting today." : "Nothing in this group yet.");
+  else if (grp === "ALL" && sort === "drift") {
+    body = groups.map((g) => {
+      const xs = items.filter((x) => x.group === g.name);
+      return xs.length ? h("div", { class: "watch-group" },
+        h("h2", { class: "h2 group-head" }, h("span", { text: groupLabel(g.name) }),
+          h("span", { class: "muted group-n", text: `${g.n} items${g.drifting ? `, ${g.drifting} drifting` : ""}` })),
+        list(xs)) : null;
+    });
+  } else body = list(items);
+  return h("div", { class: "view watch" },
+    intro(h("p", { class: "lede" },
+      "Recorded every night but not traded by the agent. Categories use the drift desk's rules on listings: ",
+      h("span", { class: "legend-inline" }, sig("W"), " week"), " ",
+      h("span", { class: "legend-inline" }, sig("M"), " month"), " ",
+      h("span", { class: "legend-inline" }, sig("Q"), " quarter"),
+      ` once an item has ${w.min_days || 95} days of history.`),
+      h("div", { class: "filters" }, chips, drifting, sortSel)),
+    section("list", body));
+}
+function watchRow(x) {
+  const young = x.days < (state.summary.watch.min_days || 95);
+  const hasDrift = x.dW != null;
+  return h("button", { type: "button", class: "row drift-row", role: "listitem", onclick: () => openSticker(x.mhn) },
+    h("span", { class: "c-sig" }, sig(x.cat)),
+    h("span", { class: "c-name" }, nameBlock(x.mhn, x.own ? h("span", { class: "own", title: `You own ${x.own}` }, ` ★ ${x.own}`) : null),
+      h("span", { class: "tags" },
+        x.cat ? h("span", { class: "tag", text: x.cat }) : null,
+        x.tag ? h("span", { class: `tag trend-${x.tag.toLowerCase()}`, text: x.tag }) : null,
+        x.in_universe ? h("span", { class: "tag", text: "In the agent's set" }) : null,
+        young ? h("span", { class: "tag new", text: x.days <= 1 ? `Recording since ${fmtDay(toDate(x.first))}` : `${x.days} days recorded` }) : null)),
+    h("span", { class: "c-list" }, h("span", { class: "k", text: "Listings" }), h("b", { text: int(x.listings) }),
+      h("span", { class: "dd" }, ...(hasDrift
+        ? [pair("W", ndelta(x.dW)), pair("M", ndelta(x.dM)), pair("Q", ndelta(x.dQ))]
+        : [pair("7d", ndelta(x.lch["7d"])), pair("30d", ndelta(x.lch["30d"]))]))),
+    h("span", { class: "c-px" }, h("span", { class: "k", text: "Ask" }), h("b", { text: price(x.ask) }),
+      h("span", { class: "dd" }, pair("1w", delta(x.ch["7d"], "", 0)), pair("1mo", delta(x.ch["30d"], "", 0)))),
     h("span", { class: "c-spark", title: "Listings, last 90 days" }, spark(x.mhn, "stock", 90, "var(--s-list)")),
   );
 }
@@ -776,7 +867,9 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#shee
 function viewSticker(mhn) {
   const s = state.summary;
   const p = nameParts(mhn);
-  const drift = s.drift.items.find((x) => x.mhn === mhn);
+  const drift = s.drift.items.find((x) => x.mhn === mhn)
+    || ((s.watch && s.watch.items) || []).find((x) => x.mhn === mhn && x.cat);
+  const watched = ((s.watch && s.watch.items) || []).find((x) => x.mhn === mhn && !x.in_universe);
   const pos = s.book.positions.find((x) => x.mhn === mhn);
   const a = s.agent || {};
   const held = (a.holdings || []).find((x) => x.mhn === mhn);
@@ -792,7 +885,8 @@ function viewSticker(mhn) {
     h("p", { class: "st-sub" }, h("span", { text: p.event }), p.variant ? h("span", { text: `${p.variant} sticker` }) : null),
     h("div", { class: "tags" },
       drift ? h("span", { class: "tag strong" }, sig(drift.cat), ` ${drift.cat}`) : h("span", { class: "tag", text: "No drift category" }),
-      drift ? h("span", { class: `tag trend-${drift.tag.toLowerCase()}`, text: drift.tag }) : null,
+      drift && drift.tag ? h("span", { class: `tag trend-${drift.tag.toLowerCase()}`, text: drift.tag }) : null,
+      watched ? h("span", { class: "tag", text: "Watching, not traded by the agent" }) : null,
       pos ? h("span", { class: "tag own" }, `★ You own ${int(pos.units)}`) : null,
       held ? h("span", { class: "tag" }, `Agent holds ${int(held.units)}`) : null));
 
@@ -850,10 +944,10 @@ function viewSticker(mhn) {
     ` ${int(x.units)} at ~${price(x.px)} (${x.state.toLowerCase()}) in today's intents`));
   if (held) agentBits.push(h("p", null, `Paper book holds ${int(held.units)} units, marked at ${money(held.mark)}.`));
   const driftBits = drift ? h("div", { class: "st-drift" },
-    table([[""], ["Now", "num"], ["1 week", "num"], ["2 weeks", "num"], ["1 month", "num"]], [
+    drift.st && drift.px ? table([[""], ["Now", "num"], ["1 week", "num"], ["2 weeks", "num"], ["1 month", "num"]], [
       h("tr", null, h("th", { scope: "row", text: "Listings" }), drift.st.map((v) => h("td", { class: "num", text: int(v) }))),
       h("tr", null, h("th", { scope: "row", text: "Ask" }), drift.px.map((v) => h("td", { class: "num", text: price(v) }))),
-    ]),
+    ]) : null,
     h("p", { class: "muted" }, `Listings drift: week ${pct(drift.dW, 0)}, month ${pct(drift.dM, 0)}, quarter ${pct(drift.dQ, 0)}.`)) : null;
 
   return h("div", { class: "st" }, head, stats,
