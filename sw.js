@@ -4,7 +4,7 @@
 //  - app code (html, js, manifest): network first, saved copy when offline,
 //    so an update is picked up on the next open
 //  - fonts and icons: saved copy first (they never change)
-const VERSION = "st-app-1.0.1";
+const VERSION = "st-app-1.0.2";
 const SHELL = [
   "./", "index.html", "app.js", "charts.js", "manifest.webmanifest", "vendor/qrcode.mjs",
   "icons/icon.svg", "icons/icon-192.png", "icons/apple-touch-icon.png",
