@@ -22,6 +22,8 @@ to connect another device without making a new token.
 ## Privacy
 
 - The token stays in this browser's storage and is only ever sent to `api.github.com`.
+- Phone pushes come from the tracker's nightly run through [ntfy](https://ntfy.sh). Settings reads the topic from
+  `live/push.json` in your tracker repository; its test button posts to ntfy.sh from this device, without the token.
 - The last downloaded summary is kept on the device so the app opens offline.
 - Settings → *Disconnect this device* removes both.
 

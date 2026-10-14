@@ -2,7 +2,7 @@
 // from your private repo's dashboard-data branch with a read-only token.
 import { timeChart, crosshairGroup, sparkline, barList, toDate, fmtDay } from "./charts.js";
 
-const VERSION = "1.0.7";
+const VERSION = "1.0.8";
 const STORE = "stickertracker.v1";
 const DATA_CACHE = "st-data-v1";
 const DEFAULT_BRANCH = "dashboard-data";
@@ -1273,6 +1273,148 @@ function viewSticker(mhn) {
     driftBits ? h("section", { class: "st-sec" }, h("h3", { class: "h3", text: "Drift snapshot" }), driftBits) : null);
 }
 
+// ------------------------------------------------------------------ phone push
+// The nightly run's push_notify.py sends one loud push every morning; its
+// settings (topic, delivery time) live in live/push.json in the tracker repo,
+// which this reads with the same read-only token.
+const NTFY = "https://ntfy.sh";
+const NTFY_PLAY = "https://play.google.com/store/apps/details?id=io.heckel.ntfy";
+const NTFY_IOS = "https://apps.apple.com/us/app/ntfy/id1625396347";
+let pushCfg;   // undefined: not checked yet; null: the repo has none; {error}: couldn't check; else live/push.json
+
+const appUrl = () => location.origin + location.pathname;
+
+// The same text push_notify.py sends (kept in step with it by hand).
+function pushText() {
+  const s = state.summary;
+  const rows = (moverRows(1) || []).filter((r) => inScope(r, "holos"));
+  if (!rows.length) return null;
+  const pc = (p, coarse) => {
+    if (p == null) return "n/a";
+    const r = roundTo(p, 1);
+    if (r === 0) return "0%";
+    return (r > 0 ? "+" : MINUS) + (Math.abs(p) * 100).toFixed(coarse && Math.abs(p) >= 0.095 ? 0 : 1) + "%";
+  };
+  const yen = (x) => (x == null ? "¥?" : x >= 100 ? "¥" + nf0.format(x) : "¥" + nf2.format(x));
+  const cities = new Map();
+  for (const r of rows) {
+    const ev = nameParts(r.mhn).event, city = ev.replace(/\s+\S+$/, "");
+    cities.set(city, (cities.get(city) || new Set()).add(ev));
+  }
+  const name = (r) => {
+    const p = nameParts(r.mhn), city = p.event.replace(/\s+\S+$/, "");
+    return `${p.team} (${cities.get(city).size <= 1 ? city : p.event})${r.own ? ` ★${r.own}` : ""}`;
+  };
+  const listings = (r) => (r.ds != null ? `listings ${pc(r.ds, true)} (${int(r.s1)})` : "listings n/a");
+  const gain = rankMovers(rows, "gainers"), drain = rankMovers(rows, "ldown");
+  const both = drain.filter((r) => r.da != null && r.da >= 0.02 && r.ds <= -0.02)
+    .sort((x, y) => Math.min(y.da, -y.ds) - Math.min(x.da, -x.ds) || (x.mhn < y.mhn ? -1 : 1));
+  const lines = [], shown = new Set();
+  for (const r of both.slice(0, 2)) { lines.push(`🔥 ${name(r)}: ${pc(r.da)} ${yen(r.a1)}, ${listings(r)}`); shown.add(r.mhn); }
+  for (const r of gain.filter((x) => !shown.has(x.mhn)).slice(0, 3)) lines.push(`▲ ${name(r)}: ${pc(r.da)} ${yen(r.a1)}, ${listings(r)}`);
+  for (const r of drain.filter((x) => !shown.has(x.mhn)).slice(0, 3))
+    lines.push(`▼ ${name(r)}: listings ${pc(r.ds, true)} (${int(r.s0)}→${int(r.s1)}), price ${pc(r.da)} ${yen(r.a1)}`);
+  const b = breadth(rows);
+  if (b.n) lines.push(`Holos: ${b.down} of ${b.n} fell, ${b.up} rose · asks ${pc(b.ask)}, bids ${pc(b.bid)} on average`);
+  const bk = s.book || {}, ag = s.agent || {}, bits = [];
+  if (bk.value != null) { const c = bk.change && bk.change["1d"]; bits.push(`Book ${money(bk.value)}${c && c.pct != null ? ` ${pc(c.pct)}` : ""}`); }
+  const al = ag.alerts || [], n = (ch) => al.filter((a) => a.startsWith(ch)).length;
+  const said = [n("🔔") ? `${n("🔔")} exit-watch` : null, n("⚡") ? `${n("⚡")} ${n("⚡") === 1 ? "entry" : "entries"}` : null,
+    n("📈") ? `${n("📈")} big ${n("📈") === 1 ? "move" : "moves"}` : null].filter(Boolean);
+  if (s.agent) bits.push(`agent ${said.length ? said.join(", ") : "no alerts"}${ag.paused ? " (PAUSED)" : ""}`);
+  const dc = s.drift && s.drift.changes && s.drift.changes.items;
+  if (dc && dc.length) bits.push(`${dc.length} drift change${dc.length === 1 ? "" : "s"}`);
+  if (bits.length) lines.push(bits.join(" · "));
+  const head = [];
+  if (gain.length) head.push(`▲ ${nameParts(gain[0].mhn).team} ${pc(gain[0].da)}`);
+  if (drain.length) head.push(`▼ ${nameParts(drain[0].mhn).team} listings ${pc(drain[0].ds, true)}`);
+  return { title: head.join(" · ") || "Stickers", message: lines.join("\n") };
+}
+
+async function sendPush(topic, { title, message }, loud) {
+  const q = new URLSearchParams({ title, tags: loud ? "rotating_light" : "white_check_mark", priority: loud ? "5" : "3",
+    click: appUrl() + "#/movers", actions: `view, Today, ${appUrl()}#/today, clear=true` });
+  const r = await fetch(`${NTFY}/${encodeURIComponent(topic)}?${q}`, { method: "POST", body: message });
+  if (!r.ok) throw new Error(`ntfy answered HTTP ${r.status}`);
+}
+
+function pushSection() {
+  const body = h("div");
+  const sec = h("section", { class: "set-sec" }, h("h3", { class: "h3", text: "Phone notifications" }), body);
+  const msg = h("p", { class: "form-msg", role: "status" });
+  const isAndroid = /android/i.test(navigator.userAgent);
+  const copy = (t) => navigator.clipboard?.writeText(t).then(() => { msg.textContent = "Topic copied."; }, () => { msg.textContent = "Couldn't copy; select the topic and copy it."; });
+  const test = async (topic) => {
+    const t = state.series ? pushText() : null;
+    msg.textContent = "Sending…";
+    try {
+      await sendPush(topic, t || { title: "StickerTracker test", message: "If you can read this on your phone, the morning push will arrive too." }, !!t);
+      msg.textContent = t ? "Sent at full volume: this is today's push, the way it lands every morning." : "Sent. Check your phone.";
+    } catch (e) { msg.textContent = e.message.startsWith("ntfy") ? e.message : "Couldn't reach ntfy.sh."; }
+  };
+  const draw = () => {
+    if (pushCfg === undefined) { body.replaceChildren(h("p", { class: "muted", text: "Checking your tracker's push settings…" })); return; }
+    if (pushCfg && pushCfg.error) {
+      body.replaceChildren(h("p", { class: "muted" }, `Couldn't check your tracker's push settings (${pushCfg.error}). `,
+        h("button", { type: "button", class: "linkish", onclick: () => { pushCfg = undefined; fetchCfg(); } }, "Try again")));
+      return;
+    }
+    const topic = pushCfg && pushCfg.topic;
+    if (topic) {
+      const at = pushCfg.deliver_at || "06:00";
+      const where = String(pushCfg.tz || "Europe/Warsaw").split("/").pop().replace(/_/g, " ");
+      body.replaceChildren(
+        h("p", { class: "muted" }, `Every morning at ${at} ${where} time, the nightly run sends one loud push: the biggest gainers with what their listings did, the biggest listings drops with what the price did, and 🔥 for a sticker whose price rose while its listings fell. Tap it to open Movers.`),
+        h("ol", { class: "steps" },
+          h("li", null, "Install ntfy, a free notification app: ",
+            h("a", { href: NTFY_PLAY, target: "_blank", rel: "noopener" }, "Google Play"), " or ",
+            h("a", { href: NTFY_IOS, target: "_blank", rel: "noopener" }, "App Store"), "."),
+          h("li", null, isAndroid ? "Subscribe to your tracker's topic: " : "In ntfy, tap + and subscribe to your tracker's topic: ",
+            h("code", { class: "topic", text: topic }),
+            h("div", { class: "row-btns" },
+              isAndroid ? h("a", { class: "btn small", href: `ntfy://ntfy.sh/${encodeURIComponent(topic)}?display=Stickers` }, "Subscribe in ntfy") : null,
+              h("button", { type: "button", class: "btn ghost small", onclick: () => copy(topic) }, "Copy topic"))),
+          h("li", null, "Check it works: ",
+            h("button", { type: "button", class: "btn ghost small", onclick: () => test(topic) }, "Send today's push now"))),
+        msg);
+      return;
+    }
+    // No settings file in the tracker repo: the older way, a topic made here plus an Actions secret.
+    const own = cfg.ntfyTopic || "";
+    const secretsUrl = cfg.repo ? `https://github.com/${cfg.repo}/settings/secrets/actions/new` : null;
+    const genTopic = () => {
+      const a = new Uint8Array(12); crypto.getRandomValues(a);
+      saveCfg({ ntfyTopic: "stickers-" + Array.from(a, (x) => "abcdefghijkmnpqrstuvwxyz23456789"[x % 32]).join("") });
+      draw();
+    };
+    body.replaceChildren(
+      h("p", { class: "muted" }, "The nightly run can send a push through ntfy, a free notification app, with a link back here."),
+      h("ol", { class: "steps" },
+        h("li", null, "Install the ntfy app on your phone (",
+          h("a", { href: NTFY_PLAY, target: "_blank", rel: "noopener" }, "Google Play"), " or ",
+          h("a", { href: NTFY_IOS, target: "_blank", rel: "noopener" }, "App Store"), ")."),
+        h("li", null, own ? h("span", null, "Subscribe to this topic in the app: ", h("code", { class: "topic", text: own }))
+          : h("span", null, h("button", { type: "button", class: "btn small", onclick: genTopic }, "Make a private topic name"))),
+        h("li", null, "Add it to your tracker repo as an Actions secret named ", h("code", { text: "NTFY_TOPIC" }), ". ",
+          secretsUrl ? h("a", { href: secretsUrl, target: "_blank", rel: "noopener" }, "Open the secrets page") : null)),
+      own ? h("div", { class: "row-btns" }, h("button", { type: "button", class: "btn ghost", onclick: () => test(own) }, "Send a test push"),
+        h("button", { type: "button", class: "btn ghost", onclick: () => copy(own) }, "Copy topic"),
+        h("button", { type: "button", class: "linkish", onclick: genTopic }, "Make a new topic")) : null,
+      msg);
+  };
+  const fetchCfg = () => {
+    draw();
+    gh(`/repos/${cfg.repo}/contents/live/push.json`, RAW)
+      .then((t) => { const j = JSON.parse(t); pushCfg = j && typeof j === "object" ? j : null; },
+        (e) => { pushCfg = e.status === 404 ? null : { error: e.status === 0 ? "offline" : e.message }; })
+      .catch(() => { pushCfg = null; })     // unreadable file: treat as none
+      .then(draw);
+  };
+  if (pushCfg === undefined && cfg.token && cfg.repo) fetchCfg();
+  else draw();
+  return sec;
+}
+
 // ------------------------------------------------------------------ settings
 function viewSettings() {
   const msg = h("p", { class: "form-msg", role: "status" });
@@ -1285,6 +1427,7 @@ function viewSettings() {
     try {
       await gh(contentsPath("summary.json", next), RAW, next.token);
       saveCfg(next);
+      pushCfg = undefined;
       msg.textContent = "Connected. Data found.";
       state.summary = null; state.series = null;
       await cacheClear();
@@ -1326,25 +1469,6 @@ function viewSettings() {
   };
   const msg2 = h("p", { class: "form-msg", role: "status" });
 
-  // Notifications (ntfy)
-  const topic = cfg.ntfyTopic || "";
-  const topicOut = h("code", { class: "topic", text: topic || "no topic yet" });
-  const ntfyMsg = h("p", { class: "form-msg", role: "status" });
-  const genTopic = () => {
-    const a = new Uint8Array(12); crypto.getRandomValues(a);
-    const t = "stickers-" + Array.from(a, (x) => "abcdefghijkmnpqrstuvwxyz23456789"[x % 32]).join("");
-    saveCfg({ ntfyTopic: t }); render();
-  };
-  const testPush = async () => {
-    ntfyMsg.textContent = "Sending…";
-    try {
-      const r = await fetch(`https://ntfy.sh/${encodeURIComponent(cfg.ntfyTopic)}?title=${encodeURIComponent("StickerTracker test")}&tags=white_check_mark`,
-        { method: "POST", body: "If you can read this on your phone, nightly pushes will arrive too." });
-      ntfyMsg.textContent = r.ok ? "Sent. Check your phone." : `ntfy answered HTTP ${r.status}.`;
-    } catch { ntfyMsg.textContent = "Couldn't reach ntfy.sh."; }
-  };
-  const secretsUrl = cfg.repo ? `https://github.com/${cfg.repo}/settings/secrets/actions/new` : null;
-
   // Install
   const install = installPrompt ? h("button", { type: "button", class: "btn", onclick: async () => { installPrompt.prompt(); installPrompt = null; render(); } }, "Install StickerTracker") : null;
   const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
@@ -1369,18 +1493,7 @@ function viewSettings() {
       h("div", { class: "row-btns" }, h("button", { type: "button", class: "btn ghost", onclick: showQr }, "Show setup QR code"),
         h("button", { type: "button", class: "btn ghost", onclick: copyLink }, "Copy setup link")),
       msg2, qrBox),
-    h("section", { class: "set-sec" }, h("h3", { class: "h3", text: "Phone notifications" }),
-      h("p", { class: "muted" }, "The nightly run can send one short push through ntfy, a free notification app, with a link back here."),
-      h("ol", { class: "steps" },
-        h("li", null, "Install the ntfy app on your phone (App Store or Google Play)."),
-        h("li", null, topic ? h("span", null, "Subscribe to this topic in the app: ", topicOut)
-          : h("span", null, h("button", { type: "button", class: "btn small", onclick: genTopic }, "Make a private topic name"))),
-        h("li", null, "Add it to your tracker repo as an Actions secret named ", h("code", { text: "NTFY_TOPIC" }), ". ",
-          secretsUrl ? h("a", { href: secretsUrl, target: "_blank", rel: "noopener" }, "Open the secrets page") : null)),
-      topic ? h("div", { class: "row-btns" }, h("button", { type: "button", class: "btn ghost", onclick: testPush }, "Send a test push"),
-        h("button", { type: "button", class: "btn ghost", onclick: () => navigator.clipboard?.writeText(topic).then(() => { ntfyMsg.textContent = "Topic copied."; }) }, "Copy topic"),
-        h("button", { type: "button", class: "linkish", onclick: genTopic }, "Make a new topic")) : null,
-      ntfyMsg),
+    pushSection(),
     h("section", { class: "set-sec" }, h("h3", { class: "h3", text: "Appearance" }), themeSeg),
     h("section", { class: "set-sec" }, h("h3", { class: "h3", text: "This device" }),
       state.summary ? h("p", { class: "muted" }, `Showing data for ${longDay(state.summary.as_of)}, exported ${ago(state.summary.generated_at)}.`) : null,
@@ -1388,7 +1501,7 @@ function viewSettings() {
         h("button", { type: "button", class: "btn ghost", onclick: async () => { await cacheClear(); state.summary = null; state.series = null; load({ force: true }); } }, "Reload all data"),
         h("button", { type: "button", class: "btn danger", onclick: async () => {
           if (!confirm("Disconnect this device? The token and saved data are removed from it.")) return;
-          await cacheClear(); store.set({ theme: cfg.theme }); cfg = store.get(); state.summary = null; state.series = null; sheetPushed = false; go("#/today"); render();
+          await cacheClear(); store.set({ theme: cfg.theme }); cfg = store.get(); pushCfg = undefined; state.summary = null; state.series = null; sheetPushed = false; go("#/today"); render();
         } }, "Disconnect this device")),
       h("p", { class: "muted small" }, `StickerTracker app ${VERSION}`)));
 }
