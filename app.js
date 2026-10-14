@@ -2,13 +2,14 @@
 // from your private repo's dashboard-data branch with a read-only token.
 import { timeChart, crosshairGroup, sparkline, barList, toDate, fmtDay } from "./charts.js";
 
-const VERSION = "1.0.6";
+const VERSION = "1.0.7";
 const STORE = "stickertracker.v1";
 const DATA_CACHE = "st-data-v1";
 const DEFAULT_BRANCH = "dashboard-data";
 const RAW = "application/vnd.github.raw+json";
 const DAY = 86400000;
 const TABS = ["today", "drift", "book", "agent", "watch"];
+const VIEWS = [...TABS, "movers"];          // movers is a page under Today, not a tab
 const RANGES = { "1M": 31, "3M": 92, "6M": 183, "1Y": 366, All: null };
 
 // ------------------------------------------------------------------ helpers
@@ -216,7 +217,7 @@ function route() {
   const q = new URLSearchParams(query || "");
   if (parts[0] === "s" && parts[1]) return { sheet: { type: "sticker", mhn: decodeURIComponent(parts.slice(1).join("/")) }, q };
   if (parts[0] === "settings") return { sheet: { type: "settings" }, q };
-  return { tab: TABS.includes(parts[0]) ? parts[0] : "today", q };
+  return { tab: VIEWS.includes(parts[0]) ? parts[0] : "today", q };
 }
 let sheetPushed = false;
 function go(hash) { location.hash = hash; }
@@ -248,7 +249,7 @@ function render() {
   if (!state.summary) {
     main.appendChild(state.error ? h("div") : h("div", { class: "loading-shell" }, h("p", { text: "Loading your tracker…" })));
   } else {
-    const view = { today: viewToday, drift: viewDrift, book: viewBook, agent: viewAgent, watch: viewWatch }[state.tab];
+    const view = { today: viewToday, drift: viewDrift, book: viewBook, agent: viewAgent, watch: viewWatch, movers: viewMovers }[state.tab];
     try { main.appendChild(view()); }
     catch (e) { console.error(e); main.appendChild(h("p", { class: "empty", text: `This view couldn't be drawn: ${e.message}` })); }
   }
@@ -281,7 +282,7 @@ function navIcon(d) {
 }
 function navLinks(cls) {
   return TABS.map((t) => h("a", {
-    href: `#/${t}`, class: cls, "aria-current": state.tab === t ? "page" : null,
+    href: `#/${t}`, class: cls, "aria-current": state.tab === t || (t === "today" && state.tab === "movers") ? "page" : null,
     onclick: () => { state.ui[`scroll:${state.tab}`] = window.scrollY; },
   }, navIcon(TAB_ICON[t]), h("span", { text: TAB_LABEL[t] })));
 }
@@ -434,7 +435,11 @@ function alertRow(text) {
 // ------------------------------------------------------------------ Today
 function viewToday() {
   const s = state.summary;
-  return h("div", { class: "view today" }, bookBrief(s.book), marketBrief(), agentBrief(s.agent), driftBrief(s.drift), pipelineNote(s));
+  // two stacks side by side on wide screens; one column in this order on phones
+  return h("div", { class: "view today" },
+    h("div", { class: "today-col a" }, bookBrief(s.book), marketBrief()),
+    h("div", { class: "today-col b" }, agentBrief(s.agent), moversBrief()),
+    driftBrief(s.drift), pipelineNote(s));
 }
 
 function bookBrief(b) {
@@ -530,14 +535,17 @@ function marketBrief() {
     h("span", { class: "mkt-c" }, delta(g.change["30d"], "", 0)),
     h("span", { class: "mkt-c" }, delta(g.change["90d"], "", 0)),
     h("span", { class: "mkt-spark", title: "Last 90 days" }, sparkline(g.values.slice(-90), "var(--s-market)")));
+  const holos = state.series ? (moverRows(1) || []).filter((r) => inScope(r, "holos")) : [];
+  const split = askBidLine(breadth(holos));
   return section("brief market",
     kicker("Market, equal-weight"),
     h("h2", { class: "headline", text: headline }),
+    split ? h("p", { class: "mkt-split", text: split }) : null,
     h("div", { class: "mkt-rows", role: "list" },
       h("div", { class: "mkt-row head", "aria-hidden": "true" }, h("span"), h("span", { text: "1 day" }),
         h("span", { text: "30 days" }), h("span", { text: "90 days" }), h("span")),
       m.groups.map(row)),
-    h("p", { class: "note", text: "Each index averages the daily price change of every tracked sticker in it, so cheap and expensive stickers count the same." }));
+    h("p", { class: "note", text: "Each index averages the daily change in mid price (halfway between ask and bid) of every tracked sticker in it, so cheap and expensive stickers count the same." }));
 }
 
 function movers(b) {
@@ -550,6 +558,249 @@ function movers(b) {
       h("span", { class: "c-name" }, nameBlock(p.mhn)),
       h("span", { class: "c-imp" }, h("b", { class: `delta ${dcls(p.dmark1d)}`, text: smoney(p.dmark1d) }),
         h("span", { class: "sub" }, `mid ${pct(p.dmid1d)}, ${int(p.units)} units`))))));
+}
+
+// ------------------------------------------------------------------ market movers
+// Computed here from series.json, so every tracked item counts: the agent's set
+// and the watch list. Price moves use the ask (lowest listing), like the rest of
+// the app's per-sticker changes; the averages also report bids, because the
+// market index and your book are valued halfway between the two.
+const MV_METRICS = [["losers", "Losers"], ["gainers", "Gainers"], ["ldown", "Listings ↓"], ["lup", "Listings ↑"]];
+const MV_PERIODS = [["1D", 1], ["7D", 7], ["30D", 30], ["90D", 90]];
+const MV_SPARK = { 1: 30, 7: 30, 30: 90, 90: 180 };   // days of context in each row's sparkline
+const MV_MIN_LISTINGS = 20;                         // listings moves need this many at the start
+const MV_PAGE = 50;
+let moversViaLink = false;                          // came from Today, so "Today" goes back
+let mvCache = null;
+
+const goodBid = (b, a) => (b > 0 && a > 0 && b <= a ? b : null);
+const effBid = (b, a) => goodBid(b, a) ?? a * 0.96;   // export_dashboard's fallback for the mid price
+const isPriceMetric = (m) => m === "losers" || m === "gainers";
+
+function scopeOf(mhn) {
+  const p = nameParts(mhn);
+  if (String(mhn).startsWith("Sticker |")) return p.variant === "Holo" ? `holo:${p.event}` : "other";
+  return /Capsule/.test(mhn) ? "other" : "agents";
+}
+const inScope = (r, scope) => (scope === "holos" ? r.scope.startsWith("holo:") : r.scope === scope);
+
+// Every item with a price on the series' last day and `days` before it.
+function moverRows(days) {
+  const se = state.series;
+  if (!se) return null;
+  const key = `${se.as_of}|${state.summary && state.summary.generated_at}|${days}`;
+  if (mvCache && mvCache.key === key) return mvCache.rows;
+  const end = +toDate(se.as_of);
+  const own = new Map(((state.summary && state.summary.book && state.summary.book.positions) || []).map((p) => [p.mhn, p.units]));
+  const rows = [];
+  for (const it of se.items) {
+    const k = Math.round((end - +toDate(it.d0)) / DAY), j = k - days;
+    if (k >= it.ask.length || j < 0) continue;
+    const a1 = it.ask[k], a0 = it.ask[j], s1 = it.stock[k], s0 = it.stock[j];
+    const priced = a1 > 0 && a0 > 0;
+    const b1 = priced ? goodBid(it.bid[k], a1) : null, b0 = priced ? goodBid(it.bid[j], a0) : null;
+    rows.push({
+      mhn: it.mhn, scope: scopeOf(it.mhn), own: own.get(it.mhn) || null,
+      a0, a1, da: priced ? a1 / a0 - 1 : null,
+      b0, b1, db: b0 && b1 ? b1 / b0 - 1 : null,
+      lask: priced ? Math.log(a1 / a0) : null,
+      lbid: priced ? Math.log(effBid(it.bid[k], a1) / effBid(it.bid[j], a0)) : null,
+      s0, s1, ds: s0 > 0 && s1 != null ? s1 / s0 - 1 : null, dsn: s0 != null && s1 != null ? s1 - s0 : null,
+    });
+  }
+  mvCache = { key, rows };
+  return rows;
+}
+
+// How many fell and rose, and the equal-weight average change of asks and bids.
+function breadth(rows) {
+  let n = 0, down = 0, up = 0, sa = 0, sb = 0, ls = 0, l0 = 0, l1 = 0, ldown = 0, lup = 0;
+  for (const r of rows) {
+    if (r.s0 > 0 && r.s1 != null) { ls++; l0 += r.s0; l1 += r.s1; if (r.s1 < r.s0) ldown++; else if (r.s1 > r.s0) lup++; }
+    if (r.da == null) continue;
+    n++;
+    const shown = roundTo(r.da, 1);              // as displayed: "−0.0%" counts as unchanged
+    if (shown < 0) down++; else if (shown > 0) up++;
+    sa += r.lask; sb += r.lbid;
+  }
+  return { n, down, up, flat: n - down - up, ask: n ? Math.exp(sa / n) - 1 : null, bid: n ? Math.exp(sb / n) - 1 : null,
+    listed: ls, ldown, lup, lchange: l0 > 0 ? l1 / l0 - 1 : null };
+}
+function moved(p) {   // "fell 1.8%", "rose 0.4%", "were flat"
+  const r = roundTo(p, 1);
+  if (r == null) return "—";
+  return Math.abs(r) < 1e-9 ? "were flat" : `${r < 0 ? "fell" : "rose"} ${(Math.abs(p) * 100).toFixed(1)}%`;
+}
+const askBidLine = (b) => (b && b.n ? `On average, asks ${moved(b.ask)} and bids ${moved(b.bid)}.` : null);
+// "124 of 193 holos fell, 11 rose and 58 didn't move" / "103 of your 125 holos fell, ..."
+function countLine(b, noun, owned) {
+  const parts = [`${int(b.down)} of ${owned ? "your " : ""}${int(b.n)} ${noun} fell`, `${int(b.up)} rose`];
+  if (b.flat) parts.push(`${int(b.flat)} didn't move`);
+  return parts.length === 3 ? `${parts[0]}, ${parts[1]} and ${parts[2]}` : `${parts[0]} and ${parts[1]}`;
+}
+function emptyMovers(metric, noun, owned) {
+  const who = owned ? `your ${noun}` : noun;
+  return {
+    losers: owned ? `None of your ${noun} fell.` : `No ${noun} fell.`,
+    gainers: owned ? `None of your ${noun} rose.` : `No ${noun} rose.`,
+    ldown: `No drops in listings among ${who} with at least ${MV_MIN_LISTINGS} listings.`,
+    lup: `No rises in listings among ${who} with at least ${MV_MIN_LISTINGS} listings.`,
+  }[metric];
+}
+
+function rankMovers(rows, metric) {
+  const val = isPriceMetric(metric) ? (r) => r.da : (r) => (r.s0 >= MV_MIN_LISTINGS ? r.ds : null);
+  const down = metric === "losers" || metric === "ldown";
+  return rows.filter((r) => { const v = roundTo(val(r), 1); return v != null && (down ? v < 0 : v > 0); })
+    .sort((x, y) => (down ? val(x) - val(y) : val(y) - val(x)) || (x.mhn < y.mhn ? -1 : 1));
+}
+
+function ownMark(units) { return units ? h("span", { class: "own", title: `You own ${units}` }, ` ★ ${units}`) : null; }
+function moverRow(r, metric, i, days, full) {
+  const px = isPriceMetric(metric);
+  const main = px
+    ? h("span", { class: "c-main" }, h("b", { class: `delta ${dcls(roundTo(r.da, 1))}`, text: pct(r.da) }),
+      h("span", { class: "sub", text: `${price(r.a0)} → ${price(r.a1)}` }))
+    : h("span", { class: "c-main" }, h("b", { class: "delta nd", text: pct(r.ds) }),
+      h("span", { class: "sub", text: `${int(r.s0)} → ${int(r.s1)}` }));
+  // the other side of the move: bid and listings for a price move, ask and bid for a listings move
+  const facts = !full ? null : h("span", { class: "c-facts" }, px
+    ? [r.db != null ? pair("Bid", delta(r.db)) : null,
+      pair("Listings", h("span", null, h("b", { text: int(r.s1) }), " ", r.ds != null ? ndelta(r.ds, 1) : null))]
+    : [pair("Ask", h("span", null, h("b", { text: price(r.a1) }), " ", r.da != null ? delta(r.da) : null)),
+      r.db != null ? pair("Bid", delta(r.db)) : null]);
+  const sp = MV_SPARK[days] || 30;
+  // reading order: rank, name, the move, the rest (the grid places them)
+  return h("button", { type: "button", class: `row mv-row ${full ? "full" : "brief"}`, role: "listitem",
+    onclick: () => openSticker(r.mhn) },
+    full ? h("span", { class: "c-rank", text: String(i + 1) }) : null,
+    h("span", { class: "c-name" }, nameBlock(r.mhn, ownMark(r.own))),
+    main,
+    facts,
+    h("span", { class: "c-spark", title: `${px ? "Ask price" : "Listings"}, last ${sp} days` },
+      spark(r.mhn, px ? "ask" : "stock", sp, px ? "var(--s-price)" : "var(--s-list)")));
+}
+function segControl(label, options, cur, onPick) {
+  const wrap = h("div", { class: "seg", role: "group", "aria-label": label });
+  for (const [v, l] of options) {
+    wrap.appendChild(h("button", { type: "button", class: "seg-btn", "aria-pressed": String(v === cur),
+      onclick: (e) => {
+        for (const b of wrap.children) b.setAttribute("aria-pressed", String(b === e.currentTarget));
+        onPick(v);
+      } }, l));
+  }
+  return wrap;
+}
+
+// Today: overnight movers across all holos.
+function moversBrief() {
+  const kick = kicker("Movers overnight, all holos");
+  if (!state.series) return section("brief movers", kick, emptyNote("Loading prices…"));
+  const rows = (moverRows(1) || []).filter((r) => inScope(r, "holos"));
+  const b = breadth(rows);
+  if (!b.n) return null;
+  let metric = ui("mv:brief", "losers");
+  if (!MV_METRICS.slice(0, 3).some(([v]) => v === metric)) metric = "losers";
+  const list = h("div", { class: "rows mv-rows", role: "list" });
+  const draw = (m) => {
+    const top = rankMovers(rows, m).slice(0, 5);
+    list.replaceChildren(...(top.length ? top.map((r, i) => moverRow(r, m, i, 1, false)) : [emptyNote(emptyMovers(m, "holos"))]));
+  };
+  draw(metric);
+  const mk = state.summary.market;
+  const noIndex = !mk || !mk.groups || !mk.groups.length;   // the market card shows this line when it's there
+  return section("brief movers", kick,
+    h("h2", { class: "headline", text: `${int(b.down)} of ${int(b.n)} holos fell, ${int(b.up)} rose` }),
+    noIndex ? h("p", { class: "mkt-split", text: askBidLine(b) }) : null,
+    h("div", { class: "filters" }, segControl("Show", MV_METRICS.slice(0, 3), metric, (v) => { metric = v; setUi("mv:brief", v, true); draw(v); })),
+    list,
+    h("a", { class: "more", href: "#/movers", onclick: () => {
+      // open the full list on what this card shows: all holos, overnight, same ranking
+      state.ui["scroll:today"] = window.scrollY;
+      state.ui["scroll:movers"] = 0;
+      Object.assign(state.ui, { "mv:metric": metric, "mv:period": "1D", "mv:scope": "holos", "mv:mine": false });
+      moversViaLink = true;
+    } }, "All movers"));
+}
+
+// The full page: any period, any group, only what you own.
+function viewMovers() {
+  const s = state.summary;
+  const back = h("a", { class: "back-link", href: "#/today", onclick: (e) => {
+    if (moversViaLink) { e.preventDefault(); history.back(); }
+  } }, "← Today");
+  const intro = (...kids) => section("intro", back, h("h1", { class: "title", text: "Movers" }), ...kids);
+  if (!state.series) return h("div", { class: "view movers-view" }, intro(emptyNote("Loading prices…")));
+
+  // groups in the data: all holos, each Major (in the market table's order), agents, the rest
+  const all = moverRows(1) || [];
+  const count = (sc) => all.filter((r) => inScope(r, sc)).length;
+  const order = ((s.market && s.market.groups) || []).map((g) => g.name);
+  const rank = (e) => { const i = order.indexOf(e); return i < 0 ? 99 : i; };
+  const year = (e) => +((e.match(/(\d{4})\s*$/) || [])[1] || 0);
+  const events = [...new Set(all.filter((r) => r.scope.startsWith("holo:")).map((r) => r.scope.slice(5)))]
+    .sort((x, y) => year(x) - year(y) || rank(x) - rank(y) || (x < y ? -1 : 1));   // oldest Major first
+  const scopes = [["holos", "All holos"], ...events.map((e) => [`holo:${e}`, `${e} holos`])];
+  if (count("agents")) scopes.push(["agents", "Agents"]);
+  if (count("other")) scopes.push(["other", "Other stickers and capsules"]);
+  const nounFor = (sc) => ({ holos: "holos", agents: "agents", other: "other items" }[sc] || `${sc.slice(5)} holos`);
+
+  let metric = ui("mv:metric", "losers"), per = ui("mv:period", "1D"), scope = ui("mv:scope", "holos"), mine = ui("mv:mine", false);
+  if (!MV_METRICS.some(([v]) => v === metric)) metric = "losers";
+  if (!MV_PERIODS.some(([v]) => v === per)) per = "1D";
+  if (!scopes.some(([v]) => v === scope)) scope = "holos";
+
+  const lede = h("p", { class: "lede mv-lede", "aria-live": "polite" });
+  const note = h("p", { class: "note" });
+  const list = h("div", { class: "rows mv-rows", role: "list" });
+  const more = h("div");
+  const PHRASE = { 1: "Since yesterday", 7: "Over the past week", 30: "Over the past 30 days", 90: "Over the past 90 days" };
+
+  const draw = () => {
+    const days = MV_PERIODS.find(([v]) => v === per)[1];
+    const rows = (moverRows(days) || []).filter((r) => inScope(r, scope) && (!mine || r.own));
+    const noun = nounFor(scope);
+    list.replaceChildren(); more.replaceChildren(); note.textContent = "";
+    if (!rows.length) {
+      const lens = state.series.items.filter((it) => inScope({ scope: scopeOf(it.mhn) }, scope)).map((it) => it.ask.length);
+      const longest = lens.length ? Math.max(...lens) : 0;
+      lede.textContent = mine && !all.some((r) => inScope(r, scope) && r.own) ? `You don't own any ${noun}.`
+        : longest && longest <= days ? `Not enough history for this period yet: these have been recorded for ${int(longest)} ${longest === 1 ? "day" : "days"}.`
+          : "Nothing to compare over this period.";
+      return;
+    }
+    const b = breadth(rows);
+    const lines = [`${PHRASE[days]}, ${countLine(b, noun, mine)}.`, askBidLine(b)];
+    if (!isPriceMetric(metric) && b.listed)
+      lines.push(`Listings fell on ${int(b.ldown)} and rose on ${int(b.lup)}; in total they ${moved(b.lchange)}.`);
+    lede.textContent = lines.filter(Boolean).join(" ");
+    const ranked = rankMovers(rows, metric);
+    const show = (n) => {
+      list.replaceChildren(...(ranked.length ? ranked.slice(0, n).map((r, i) => moverRow(r, metric, i, days, true))
+        : [emptyNote(emptyMovers(metric, noun, mine))]));
+      more.replaceChildren(ranked.length > n ? h("button", { type: "button", class: "more", onclick: () => show(ranked.length) },
+        `Show all ${int(ranked.length)}`) : "");
+    };
+    show(MV_PAGE);
+    note.textContent = isPriceMetric(metric)
+      ? "Price is the lowest listing (ask). Tap a row for its chart."
+      : `Counts items with at least ${MV_MIN_LISTINGS} listings at the start of the period. Tap a row for its chart.`;
+  };
+
+  const scopeSel = h("select", { class: "select", "aria-label": "Group", onchange: (e) => { scope = e.target.value; setUi("mv:scope", scope); draw(); } },
+    scopes.map(([v, l]) => h("option", { value: v, selected: v === scope }, `${l} (${int(count(v))})`)));
+  const own = h("label", { class: "toggle" },
+    h("input", { type: "checkbox", checked: mine, onchange: (e) => { mine = e.target.checked; setUi("mv:mine", mine); draw(); } }),
+    h("span", { text: "Only stickers I own" }));
+  draw();
+  return h("div", { class: "view movers-view" },
+    intro(lede,
+      h("div", { class: "filters" },
+        segControl("Show", MV_METRICS, metric, (v) => { metric = v; setUi("mv:metric", v); draw(); }),
+        segControl("Period", MV_PERIODS.map(([v]) => [v, v]), per, (v) => { per = v; setUi("mv:period", v); draw(); }),
+        scopeSel, own),
+      note),
+    section("list", list, more));
 }
 
 function agentHeadline(a) {
@@ -1275,6 +1526,7 @@ window.addEventListener("hashchange", () => {
     return;
   }
   sheetPushed = false;
+  if (r.tab !== "movers") moversViaLink = false;
   render();
   window.scrollTo(0, state.ui[`scroll:${state.tab}`] || 0);
 });

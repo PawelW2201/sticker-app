@@ -156,13 +156,26 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 .pipeline { padding: 18px 0 8px; font-size: 13px; color: var(--muted); }
 .pipeline p { margin: 0 0 3px; }
 
+/* Today: one column on phones (book, market, movers, agent, drift), two stacks on wide screens */
+.today { display: flex; flex-direction: column; }
+.today-col { display: contents; }
+.today-col > .band:last-child { border-bottom: 1px solid var(--line); }
+.today .brief.book { order: 1; }
+.today .brief.market { order: 2; }
+.today .brief.movers { order: 3; }
+.today .brief.agent { order: 4; }
+.today .brief.drift { order: 5; }
+.today .pipeline { order: 6; }
 @media (min-width: 1100px) {
-  .today { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); column-gap: 48px; }
-  .today .brief.book { grid-column: 1; grid-row: 1; }
-  .today .brief.agent { grid-column: 2; grid-row: 1 / span 2; }
-  .today .brief.market { grid-column: 1; grid-row: 2; }
+  .today { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); column-gap: 48px; align-items: start; }
+  .today-col { display: block; min-width: 0; }
+  .today-col.a { grid-column: 1; grid-row: 1; }
+  .today-col.b { grid-column: 2; grid-row: 1; }
   .today .brief.drift, .today .pipeline { grid-column: 1 / -1; }
 }
+.mkt-split { margin: -6px 0 10px; color: var(--ink-2); font-size: 14.5px; }
+.back-link { display: inline-block; margin: 0 0 10px; padding: 4px 0; color: var(--link); font-weight: 500; text-decoration: none; }
+.back-link:hover { text-decoration: underline; }
 
 /* ---------- numbers ---------- */
 .delta { font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -252,6 +265,26 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 .mover-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .mover-row .c-imp { text-align: right; }
 .mover-row .c-imp b { font-size: 16px; }
+/* market movers: compact on Today, ranked with facts on the Movers page */
+.mv-rows { margin-top: 4px; }
+.mv-row { align-items: center; }
+.mv-row .c-name { grid-area: name; min-width: 0; }
+.mv-row .c-main { grid-area: main; text-align: right; }
+.mv-row .c-main b { font-size: 16px; }
+.mv-row .c-spark { grid-area: spark; }
+.mv-row.brief { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "name spark main"; }
+@media (max-width: 420px) {
+  .mv-row.brief { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name main"; }
+  .mv-row.brief .c-spark { display: none; }
+}
+.mv-row.full { grid-template-columns: 22px minmax(0, 1fr) auto; grid-template-areas: "rank name main" "rank facts spark"; gap: 4px 10px; }
+.mv-row .c-rank { grid-area: rank; align-self: start; padding-top: 2px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.mv-row .c-facts { grid-area: facts; display: flex; flex-wrap: wrap; gap: 0 14px; align-items: baseline; font-size: 13.5px; }
+@media (min-width: 820px) {
+  .mv-row.full { grid-template-columns: 30px minmax(0, 1.5fr) minmax(0, 1.4fr) 84px 124px; grid-template-areas: "rank name facts spark main"; gap: 6px 14px; }
+  .mv-row .c-rank { align-self: center; padding-top: 0; }
+}
+.movers-view .filters { gap: 10px; }
 .spark { display: block; overflow: visible; }
 .spark-line { fill: none; stroke: var(--c); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
 .spark-dot { fill: var(--c); }

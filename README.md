@@ -1,7 +1,8 @@
 # StickerTracker app
 
 An installable web app for a private StickerTracker repository: your book's value and overnight change,
-the agent's alerts and intents, the drift desk, and per-sticker price and listings charts.
+the market by Major, the day's biggest movers (prices and listings), the agent's alerts and intents, the drift
+desk, the watch list, and per-sticker price and listings charts.
 
 This repository holds **only the app's code**. It contains no data and no repository names. When you open
 the app, it reads the nightly summary that the tracker publishes to the `dashboard-data` branch of your
@@ -29,7 +30,7 @@ to connect another device without making a new token.
 | File | What it is |
 |---|---|
 | `index.html` | Page shell and styles |
-| `app.js` | The app: setup, data loading, Today / Drift desk / Your book / Agent, sticker detail, settings |
+| `app.js` | The app: setup, data loading, Today (with Movers) / Drift desk / Your book / Agent / Watching, sticker detail, settings |
 | `charts.js` | Small SVG charts (one y-axis each; stacked charts share a crosshair) |
 | `sw.js` | Offline copy of the app's own files (never touches GitHub data requests) |
 | `manifest.webmanifest`, `icons/` | Install metadata and icons |
