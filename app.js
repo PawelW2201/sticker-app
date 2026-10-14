@@ -2,7 +2,7 @@
 // from your private repo's dashboard-data branch with a read-only token.
 import { timeChart, crosshairGroup, sparkline, barList, toDate, fmtDay } from "./charts.js";
 
-const VERSION = "1.0.8";
+const VERSION = "1.0.9";
 const STORE = "stickertracker.v1";
 const DATA_CACHE = "st-data-v1";
 const DEFAULT_BRANCH = "dashboard-data";
@@ -1286,7 +1286,6 @@ const appUrl = () => location.origin + location.pathname;
 
 // The same text push_notify.py sends (kept in step with it by hand).
 function pushText() {
-  const s = state.summary;
   const rows = (moverRows(1) || []).filter((r) => inScope(r, "holos"));
   if (!rows.length) return null;
   const pc = (p, coarse) => {
@@ -1303,37 +1302,23 @@ function pushText() {
   }
   const name = (r) => {
     const p = nameParts(r.mhn), city = p.event.replace(/\s+\S+$/, "");
-    return `${p.team} (${cities.get(city).size <= 1 ? city : p.event})${r.own ? ` ★${r.own}` : ""}`;
+    return `${p.team} (${cities.get(city).size <= 1 ? city : p.event})`;
   };
-  const listings = (r) => (r.ds != null ? `listings ${pc(r.ds, true)} (${int(r.s1)})` : "listings n/a");
-  const gain = rankMovers(rows, "gainers"), drain = rankMovers(rows, "ldown");
-  const both = drain.filter((r) => r.da != null && r.da >= 0.02 && r.ds <= -0.02)
-    .sort((x, y) => Math.min(y.da, -y.ds) - Math.min(x.da, -x.ds) || (x.mhn < y.mhn ? -1 : 1));
-  const lines = [], shown = new Set();
-  for (const r of both.slice(0, 2)) { lines.push(`🔥 ${name(r)}: ${pc(r.da)} ${yen(r.a1)}, ${listings(r)}`); shown.add(r.mhn); }
-  for (const r of gain.filter((x) => !shown.has(x.mhn)).slice(0, 3)) lines.push(`▲ ${name(r)}: ${pc(r.da)} ${yen(r.a1)}, ${listings(r)}`);
-  for (const r of drain.filter((x) => !shown.has(x.mhn)).slice(0, 3))
-    lines.push(`▼ ${name(r)}: listings ${pc(r.ds, true)} (${int(r.s0)}→${int(r.s1)}), price ${pc(r.da)} ${yen(r.a1)}`);
-  const b = breadth(rows);
-  if (b.n) lines.push(`Holos: ${b.down} of ${b.n} fell, ${b.up} rose · asks ${pc(b.ask)}, bids ${pc(b.bid)} on average`);
-  const bk = s.book || {}, ag = s.agent || {}, bits = [];
-  if (bk.value != null) { const c = bk.change && bk.change["1d"]; bits.push(`Book ${money(bk.value)}${c && c.pct != null ? ` ${pc(c.pct)}` : ""}`); }
-  const al = ag.alerts || [], n = (ch) => al.filter((a) => a.startsWith(ch)).length;
-  const said = [n("🔔") ? `${n("🔔")} exit-watch` : null, n("⚡") ? `${n("⚡")} ${n("⚡") === 1 ? "entry" : "entries"}` : null,
-    n("📈") ? `${n("📈")} big ${n("📈") === 1 ? "move" : "moves"}` : null].filter(Boolean);
-  if (s.agent) bits.push(`agent ${said.length ? said.join(", ") : "no alerts"}${ag.paused ? " (PAUSED)" : ""}`);
-  const dc = s.drift && s.drift.changes && s.drift.changes.items;
-  if (dc && dc.length) bits.push(`${dc.length} drift change${dc.length === 1 ? "" : "s"}`);
-  if (bits.length) lines.push(bits.join(" · "));
-  const head = [];
-  if (gain.length) head.push(`▲ ${nameParts(gain[0].mhn).team} ${pc(gain[0].da)}`);
-  if (drain.length) head.push(`▼ ${nameParts(drain[0].mhn).team} listings ${pc(drain[0].ds, true)}`);
-  return { title: head.join(" · ") || "Stickers", message: lines.join("\n") };
+  const star = (r) => (r.own ? `, ★${r.own}` : "");
+  const gain = rankMovers(rows, "gainers").slice(0, 5), drain = rankMovers(rows, "ldown").slice(0, 5);
+  const lines = [
+    "Top gainers:",
+    ...(gain.length ? gain.map((r) => `${name(r)}: price ${pc(r.da)}, listings ${pc(r.ds, true)}${star(r)}`) : ["none today"]),
+    "",
+    "Top listings decreases:",
+    ...(drain.length ? drain.map((r) => `${name(r)}: listings ${pc(r.ds, true)} (${int(r.s0)}→${int(r.s1)}), price ${pc(r.da)} ${yen(r.a1)}${star(r)}`)
+      : ["none today"]),
+  ];
+  return { title: `Movers · ${longDay(state.summary.as_of)}`, message: lines.join("\n") };
 }
 
 async function sendPush(topic, { title, message }, loud) {
-  const q = new URLSearchParams({ title, tags: loud ? "rotating_light" : "white_check_mark", priority: loud ? "5" : "3",
-    click: appUrl() + "#/movers", actions: `view, Today, ${appUrl()}#/today, clear=true` });
+  const q = new URLSearchParams({ title, priority: loud ? "5" : "3", click: appUrl() + "#/movers" });
   const r = await fetch(`${NTFY}/${encodeURIComponent(topic)}?${q}`, { method: "POST", body: message });
   if (!r.ok) throw new Error(`ntfy answered HTTP ${r.status}`);
 }
@@ -1364,7 +1349,7 @@ function pushSection() {
       const at = pushCfg.deliver_at || "06:00";
       const where = String(pushCfg.tz || "Europe/Warsaw").split("/").pop().replace(/_/g, " ");
       body.replaceChildren(
-        h("p", { class: "muted" }, `Every morning at ${at} ${where} time, the nightly run sends one loud push: the biggest gainers with what their listings did, the biggest listings drops with what the price did, and 🔥 for a sticker whose price rose while its listings fell. Tap it to open Movers.`),
+        h("p", { class: "muted" }, `Every morning at ${at} ${where} time, the nightly run sends one loud push: the top 5 gainers with what their listings did, and the top 5 listings decreases with what their price did. Tap it to open Movers.`),
         h("ol", { class: "steps" },
           h("li", null, "Install ntfy, a free notification app: ",
             h("a", { href: NTFY_PLAY, target: "_blank", rel: "noopener" }, "Google Play"), " or ",
