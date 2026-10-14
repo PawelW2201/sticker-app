@@ -2,7 +2,7 @@
 // from your private repo's dashboard-data branch with a read-only token.
 import { timeChart, crosshairGroup, sparkline, barList, toDate, fmtDay } from "./charts.js";
 
-const VERSION = "1.0.4";
+const VERSION = "1.0.5";
 const STORE = "stickertracker.v1";
 const DATA_CACHE = "st-data-v1";
 const DEFAULT_BRANCH = "dashboard-data";
@@ -513,7 +513,8 @@ function agentStats(a) {
     stat("Positions", int((a.holdings || []).length), h("span", { class: "stat-sub", text: money(a.mark) })));
 }
 function equityChart(box, height) {
-  const log = (state.summary.log || []).filter((r) => r.equity != null);
+  const start = (state.summary.agent && state.summary.agent.start) || "";   // current paper book only
+  const log = (state.summary.log || []).filter((r) => r.equity != null && r.date >= start);
   if (log.length < 2) { box.appendChild(emptyNote("The equity history builds up one point per nightly run.")); return; }
   timeChart(box, {
     dates: log.map((r) => r.date), height, fmt: money, tickFmt: (v) => "¥" + compact(v), connectGaps: true,
