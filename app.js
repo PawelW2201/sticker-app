@@ -2,7 +2,7 @@
 // from your private repo's dashboard-data branch with a read-only token.
 import { timeChart, crosshairGroup, sparkline, barList, toDate, fmtDay } from "./charts.js";
 
-const VERSION = "1.0.9";
+const VERSION = "1.0.10";
 const STORE = "stickertracker.v1";
 const DATA_CACHE = "st-data-v1";
 const DEFAULT_BRANCH = "dashboard-data";
@@ -39,7 +39,11 @@ const money = (v) => (v == null ? "—" : (v < 0 ? MINUS : "") + "¥" + nf0.form
 const smoney = (v) => (v == null ? "—" : sign(v) + "¥" + nf0.format(Math.abs(v)));
 const price = (v) => (v == null ? "—" : "¥" + nf2.format(v));
 const int = (v) => (v == null ? "—" : nf0.format(v));
-const pct = (p, d = 1) => (p == null ? "—" : sign(Math.round(p * 10 ** (d + 2)) / 10 ** (d + 2)) + (Math.abs(p) * 100).toFixed(d) + "%");
+const pct = (p, d = 1) => {   // sign and digits from the same rounded value, so −0.05% shows as 0.0%, not "0.1%"
+  if (p == null) return "—";
+  const r = Math.round(p * 10 ** (d + 2)) / 10 ** (d + 2);
+  return sign(r) + (Math.abs(r) * 100).toFixed(d) + "%";
+};
 function compact(v) {
   const a = Math.abs(v), s = v < 0 ? MINUS : "";
   if (a >= 1e6) return s + (a / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
