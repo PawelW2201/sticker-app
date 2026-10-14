@@ -2,7 +2,7 @@
 // from your private repo's dashboard-data branch with a read-only token.
 import { timeChart, crosshairGroup, sparkline, barList, toDate, fmtDay } from "./charts.js";
 
-const VERSION = "1.0.5";
+const VERSION = "1.0.6";
 const STORE = "stickertracker.v1";
 const DATA_CACHE = "st-data-v1";
 const DEFAULT_BRANCH = "dashboard-data";
@@ -434,7 +434,7 @@ function alertRow(text) {
 // ------------------------------------------------------------------ Today
 function viewToday() {
   const s = state.summary;
-  return h("div", { class: "view today" }, bookBrief(s.book), agentBrief(s.agent), driftBrief(s.drift), pipelineNote(s));
+  return h("div", { class: "view today" }, bookBrief(s.book), marketBrief(), agentBrief(s.agent), driftBrief(s.drift), pipelineNote(s));
 }
 
 function bookBrief(b) {
@@ -446,34 +446,98 @@ function bookBrief(b) {
     headline = Math.abs(ch.pct) < 0.0005 ? "Your book held steady overnight"
       : `Your book ${ch.abs < 0 ? "fell" : "rose"} ${money(Math.abs(ch.abs))} overnight`;
   }
+  const mkt = marketGroup("All holos");
+  const mch = (k) => (mkt && mkt.change ? mkt.change[k] : null);
   const periods = [["7 days", "7d"], ["30 days", "30d"], ["90 days", "90d"], ["1 year", "1y"]]
     .filter(([, k]) => b.change && b.change[k])
-    .map(([lab, k]) => h("li", null, h("span", { class: "per-label", text: lab }), delta(b.change[k].pct)));
+    .map(([lab, k]) => h("li", null, h("span", { class: "per-label", text: lab }), delta(b.change[k].pct),
+      mch(k) != null ? h("span", { class: "per-mkt", text: `market ${pct(mch(k))}` }) : null));
   const chartBox = h("div", { class: "chart-box" });
-  const draw = (r) => {
+  let range = ui("range:book", "3M");
+  const draw = () => {
     chartBox.replaceChildren();
-    const days = RANGES[r];
+    const days = RANGES[range];
     const hist = days ? b.history.slice(-days) : b.history;
+    const dates = hist.map((x) => x[0]);
+    const span = range === "All" ? "all available history" : "the last " + range;
+    if (mkt && ui("book:mode", "value") === "market") {
+      // both lines as % change since the first day of the range that has both
+      const m = dates.map((d) => indexOn(mkt, d));
+      const i0 = m.findIndex((v) => v != null);
+      if (i0 >= 0) {
+        const rebase = (v, base, i) => (i < i0 || v == null ? null : (100 * v) / base);
+        timeChart(chartBox, {
+          dates, height: 170, fmt: (v) => pct(v / 100 - 1), tickFmt: (v) => pct(v / 100 - 1, 0),
+          series: [
+            { name: "Your book", values: hist.map((x, i) => rebase(x[1], hist[i0][1], i)), color: "var(--s-book)", kind: "line" },
+            { name: "All holos", values: m.map((v, i) => rebase(v, m[i0], i)), color: "var(--s-market)", kind: "line" },
+          ],
+          label: `Your book and the holo market, change over ${span}`,
+        });
+        return;
+      }
+    }
     timeChart(chartBox, {
-      dates: hist.map((x) => x[0]), height: 170, fmt: money, tickFmt: (v) => "¥" + compact(v),
+      dates, height: 170, fmt: money, tickFmt: (v) => "¥" + compact(v),
       series: [{ name: "Book value", values: hist.map((x) => x[1]), color: "var(--s-book)", kind: "area" }],
-      label: `Book value over ${r === "All" ? "all available history" : "the last " + r}`,
+      label: `Book value over ${span}`,
     });
   };
-  const seg = rangeControl("range:book", "3M", draw);
+  const seg = rangeControl("range:book", "3M", (r) => { range = r; draw(); });
+  const modeSeg = mkt ? h("div", { class: "seg", role: "group", "aria-label": "Show" },
+    [["value", "Value"], ["market", "vs market"]].map(([v, l]) => h("button", {
+      type: "button", class: "seg-btn", "aria-pressed": String(ui("book:mode", "value") === v),
+      onclick: (e) => {
+        for (const x of e.currentTarget.parentNode.children) x.setAttribute("aria-pressed", String(x === e.currentTarget));
+        setUi("book:mode", v, true); draw();
+      },
+    }, l))) : null;
   const sec = section("brief book",
     kicker(`Your book on ${longDay(state.summary.as_of)}`),
     h("h2", { class: "headline", text: headline }),
-    h("div", { class: "hero" }, h("span", { class: "hero-val", text: money(b.value) }), ch ? delta(ch.pct, "chip") : null),
+    h("div", { class: "hero" }, h("span", { class: "hero-val", text: money(b.value) }), ch ? delta(ch.pct, "chip") : null,
+      mch("1d") != null ? h("span", { class: "hero-mkt", text: `market ${pct(mch("1d"))}` }) : null),
     periods.length ? h("ul", { class: "periods" }, periods) : null,
     b.pnl != null ? h("p", { class: "muted" }, `Unrealised P&L ${smoney(b.pnl)} on cost ${money(b.cost)}`) : null,
-    h("div", { class: "filters" }, seg),
+    h("div", { class: "filters" }, seg, modeSeg),
     chartBox,
     h("p", { class: "note" }, `${int(b.count)} holdings, ${int(b.units)} units, valued at today's quantities and each day's mid price, net of the 1% sell fee.`),
     movers(b),
   );
-  queueMicrotask(() => draw(ui("range:book", "3M")));
+  queueMicrotask(draw);
   return sec;
+}
+
+// ------------------------------------------------------------------ market
+function marketGroup(name) {
+  const m = state.summary.market;
+  return (m && (m.groups || []).find((g) => g.name === name)) || null;
+}
+function indexOn(g, iso) {
+  const k = Math.round((toDate(iso) - toDate(g.d0)) / DAY);
+  return k >= 0 && k < g.values.length ? g.values[k] : null;
+}
+function marketBrief() {
+  const m = state.summary.market;
+  if (!m || !m.groups || !m.groups.length) return null;
+  const all = marketGroup("All holos") || m.groups[0];
+  const c = all.change["1d"];
+  const headline = c == null ? "Market" : Math.abs(c) < 0.0005 ? "Holo prices held steady overnight"
+    : `Holo prices ${c < 0 ? "fell" : "rose"} ${(Math.abs(c) * 100).toFixed(1)}% overnight`;
+  const row = (g) => h("div", { class: `mkt-row${g === all ? " all" : ""}`, role: "listitem" },
+    h("span", { class: "mkt-name" }, h("b", { text: g.name }), h("span", { class: "muted", text: ` ${g.n}` })),
+    h("span", { class: "mkt-c" }, delta(g.change["1d"])),
+    h("span", { class: "mkt-c" }, delta(g.change["30d"], "", 0)),
+    h("span", { class: "mkt-c" }, delta(g.change["90d"], "", 0)),
+    h("span", { class: "mkt-spark", title: "Last 90 days" }, sparkline(g.values.slice(-90), "var(--s-market)")));
+  return section("brief market",
+    kicker("Market, equal-weight"),
+    h("h2", { class: "headline", text: headline }),
+    h("div", { class: "mkt-rows", role: "list" },
+      h("div", { class: "mkt-row head", "aria-hidden": "true" }, h("span"), h("span", { text: "1 day" }),
+        h("span", { text: "30 days" }), h("span", { text: "90 days" }), h("span")),
+      m.groups.map(row)),
+    h("p", { class: "note", text: "Each index averages the daily price change of every tracked sticker in it, so cheap and expensive stickers count the same." }));
 }
 
 function movers(b) {
